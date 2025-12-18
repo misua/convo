@@ -1,0 +1,62 @@
+# Configuration for Blood Cell Analyzer
+
+# Paths
+paths:
+  data_root: "./data"
+  bccd_path: "./data/bccd"
+  kaggle_path: "./data/kaggle"
+  models_path: "./models"
+  samples_path: "./data/samples"
+
+# Detection Model (YOLOv8)
+detection:
+  model: "yolov8n.pt"  # Start with nano, upgrade if needed
+  image_size: 640
+  batch_size: 16  # Safe for 12GB VRAM
+  epochs: 50
+  confidence_threshold: 0.5
+  iou_threshold: 0.5
+  classes:
+    - "RBC"
+    - "WBC"
+    - "Platelets"
+
+# Classification Model (EfficientNet)
+classification:
+  model: "efficientnet_b0"
+  image_size: 224
+  batch_size: 32
+  epochs: 20
+  learning_rate: 0.001
+  classes:
+    - "EOSINOPHIL"
+    - "LYMPHOCYTE"
+    - "MONOCYTE"
+    - "NEUTROPHIL"
+
+# Morphology Analysis
+morphology:
+  # Default microscope calibration (40x objective, typical)
+  um_per_pixel: 0.25
+  # RBC reference values
+  rbc_normal_diameter_um: [6.2, 8.2]  # min, max
+  # Hypochromia threshold
+  central_pallor_ratio: 0.33
+  # RDW reference
+  rdw_normal_percent: [11.5, 14.5]
+
+# Risk Scoring Weights
+risk_scoring:
+  microcytic_weight: 0.4
+  hypochromic_weight: 0.4
+  rdw_weight: 0.2
+  thresholds:
+    low: 0.3
+    medium: 0.6
+    # high: > 0.6
+
+# Dashboard
+dashboard:
+  host: "127.0.0.1"
+  port: 7860
+  share: false

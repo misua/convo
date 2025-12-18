@@ -1,0 +1,133 @@
+# ===========================================
+# Python
+# ===========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+
+# ===========================================
+# ML/AI Models & Data (LARGE FILES)
+# ===========================================
+# Model weights
+*.pt
+*.pth
+*.pkl
+*.h5
+*.hdf5
+*.onnx
+*.pb
+*.tflite
+*.caffemodel
+*.weights
+
+# Datasets
+*.zip
+*.tar
+*.tar.gz
+*.gz
+*.csv
+*.json
+!configs/*.yaml
+!**/data.yaml
+
+# Training outputs
+runs/
+wandb/
+mlruns/
+lightning_logs/
+
+# Blood Cell Analyzer specific
+blood-cell-analyzer/venv/
+blood-cell-analyzer/models/
+blood-cell-analyzer/data/bccd/
+blood-cell-analyzer/data/kaggle/
+blood-cell-analyzer/data/bccd_yolo/images/
+blood-cell-analyzer/data/bccd_yolo/labels/
+blood-cell-analyzer/data/custom_yolo/
+blood-cell-analyzer/data/samples/*.jpg
+blood-cell-analyzer/data/samples/*.png
+blood-cell-analyzer/data/samples/*.json
+blood-cell-analyzer/*.pt
+
+# ===========================================
+# IDE & Editors
+# ===========================================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# ===========================================
+# OS Files
+# ===========================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# ===========================================
+# Jupyter Notebooks
+# ===========================================
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ===========================================
+# Environment & Secrets
+# ===========================================
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+secrets/
+credentials/
+
+# ===========================================
+# Logs & Temp
+# ===========================================
+*.log
+logs/
+tmp/
+temp/
+cache/
+.cache/
+
+# ===========================================
+# Testing
+# ===========================================
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+blood-cell-analyzer/data/bccd_yolo/
