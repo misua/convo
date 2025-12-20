@@ -71,6 +71,14 @@ blood-cell-analyzer/data/samples/*.jpg
 blood-cell-analyzer/data/samples/*.png
 blood-cell-analyzer/data/samples/*.json
 blood-cell-analyzer/*.pt
+blood-cell-analyzer/data/
+blood-cell-analyzer/runs/
+blood-cell-analyzer/outputs/
+blood-cell-analyzer/logs/
+blood-cell-analyzer/tmp/
+blood-cell-analyzer/temp/
+blood-cell-analyzer/.cache/
+blood-cell-analyzer/test_report.pdf
 
 # ===========================================
 # IDE & Editors
