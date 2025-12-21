@@ -567,9 +567,10 @@ class RBCShapeClassifier:
         # Check if thalassemia indicator
         is_thal_indicator = shape in [RBCShape.TARGET, RBCShape.TEARDROP]
         
-        # Check if malaria infected
-        is_infected = shape in [RBCShape.RING, RBCShape.TROPHOZOITE]
-        parasite_stage = shape.value if is_infected else None
+        # Malaria detection is now exclusively handled by YOLO object detector
+        # CNN shape classifier only detects RBC morphology for thalassemia/sickle cell
+        is_infected = False  # Always False - use YOLO malaria detector instead
+        parasite_stage = None  # Always None - use YOLO malaria detector instead
         
         return ShapeClassification(
             shape=shape,

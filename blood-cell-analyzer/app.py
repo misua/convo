@@ -430,14 +430,9 @@ def format_report(results: dict) -> str:
             f"- **Abnormality Index:** {shape_analysis.get('abnormality_index', 0):.2f}",
         ])
         
-        # Add disorder-specific metrics
-        malaria_infected = shape_analysis.get('malaria_infected', 0)
+        # Add disorder-specific metrics (malaria now handled by YOLO detector in pathology section)
         sickle_cells = shape_analysis.get('sickle_cells', 0)
         thal_indicators = shape_analysis.get('thalassemia_indicator_pct', 0)
-        
-        if malaria_infected > 0:
-            malaria_pct = shape_analysis.get('malaria_infected_pct', 0)
-            lines.append(f"- **Malaria Infected Cells:** {malaria_infected} ({malaria_pct:.2f}%)")
         
         if sickle_cells > 0:
             sickle_pct = shape_analysis.get('sickle_cell_pct', 0)

@@ -615,8 +615,7 @@ class BloodSmearAnalyzer:
                 "shape_counts": shape_stats.shape_counts,
                 "thalassemia_indicators": shape_stats.thalassemia_indicators,
                 "thalassemia_indicator_pct": shape_stats.thalassemia_indicator_pct,
-                "malaria_infected": shape_stats.malaria_infected,
-                "malaria_infected_pct": shape_stats.malaria_infected_pct,
+                # Malaria detection removed from shape analysis - use YOLO detector results instead
                 "sickle_cells": shape_stats.sickle_cells,
                 "sickle_cell_pct": shape_stats.sickle_cell_pct,
                 "parasite_stages": shape_stats.parasite_stages,
