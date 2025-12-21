@@ -2,7 +2,8 @@
 """
 RBC Shape Classifier Module
 
-Classifies red blood cell morphology into 6 categories for thalassemia screening.
+Classifies red blood cell morphology into 9 categories for multi-disorder detection.
+Detects thalassemia indicators, malaria parasites, and sickle cells.
 Uses shape metrics (circularity, elongation, solidity) and optional deep learning.
 """
 
@@ -15,13 +16,21 @@ from enum import Enum
 
 
 class RBCShape(Enum):
-    """RBC shape classification categories."""
+    """RBC shape classification categories for multi-disorder detection."""
+    # Thalassemia-related shapes
     NORMAL = "normal"
-    MICROCYTE = "microcyte"
-    TARGET = "target"      # Codocyte - thalassemia indicator
-    TEARDROP = "teardrop"  # Dacrocyte - thalassemia indicator
-    SPHEROCYTE = "spherocyte"
+    MICROCYTE = "microcyte"    # Small cell - thalassemia/iron deficiency indicator
+    TARGET = "target"          # Codocyte - thalassemia indicator
+    TEARDROP = "teardrop"      # Dacrocyte - thalassemia indicator
+    SPHEROCYTE = "spherocyte"  # Hereditary spherocytosis
     IRREGULAR = "irregular"
+    
+    # Malaria parasite stages
+    RING = "ring"              # Ring stage - early malaria infection
+    TROPHOZOITE = "trophozoite"  # Mature malaria parasite
+    
+    # Sickle cell disease
+    SICKLE = "sickle"          # Crescent/banana shaped cell
 
 
 @dataclass
@@ -45,6 +54,8 @@ class ShapeClassification:
     confidence: float
     metrics: ShapeMetrics
     is_thalassemia_indicator: bool = False
+    is_infected: bool = False  # True if malaria parasite detected
+    parasite_stage: Optional[str] = None  # ring, trophozoite, etc.
     bbox: List[float] = field(default_factory=list)
     mask: Optional[np.ndarray] = None
     crop: Optional[np.ndarray] = None
@@ -59,6 +70,11 @@ class ShapePopulationStats:
     abnormality_index: float = 0.0
     thalassemia_indicators: int = 0
     thalassemia_indicator_pct: float = 0.0
+    malaria_infected: int = 0  # Total infected RBCs (RING + TROPHOZOITE)
+    malaria_infected_pct: float = 0.0
+    sickle_cells: int = 0  # Total sickle cells
+    sickle_cell_pct: float = 0.0
+    parasite_stages: Dict[str, int] = field(default_factory=dict)  # {"ring": 5, "trophozoite": 2}
     flagged_cells: List[ShapeClassification] = field(default_factory=list)
     mean_circularity: float = 0.0
     mean_elongation: float = 0.0
@@ -286,8 +302,11 @@ class RBCShapeClassifier:
     Classify RBC shapes using metrics and optional deep learning.
     
     Uses rule-based classification on shape metrics as primary method,
-    with optional CNN classifier for refinement.
+    with optional CNN classifier for malaria/sickle detection.
     """
+    
+    # CNN class mapping (must match training vocab order)
+    CNN_CLASSES = ['infected', 'normal', 'sickle']
     
     def __init__(
         self,
@@ -302,7 +321,7 @@ class RBCShapeClassifier:
         Args:
             um_per_pixel: Microscope calibration
             use_deep_learning: Whether to use CNN classifier
-            model_path: Path to trained CNN model
+            model_path: Path to trained CNN model (.pkl file)
             config: Configuration dict from config.yaml
         """
         self.um_per_pixel = um_per_pixel
@@ -340,38 +359,104 @@ class RBCShapeClassifier:
             rbc_normal_diameter_um=(self.rbc_min_diameter, self.rbc_max_diameter)
         )
         
-        # Load CNN model if requested
+        # CNN model for malaria/sickle detection
         self.cnn_model = None
+        self.cnn_device = None
+        self.cnn_transform = None
+        
         if use_deep_learning and model_path:
             self._load_cnn_model(model_path)
     
     def _load_cnn_model(self, model_path: str):
-        """Load trained CNN shape classifier."""
+        """Load trained CNN RBC classifier (ResNet34 for malaria/sickle detection)."""
         try:
             import torch
-            import timm
-            
-            # Load model (placeholder - would load trained weights)
-            self.cnn_model = timm.create_model(
-                'efficientnet_v2_s',
-                pretrained=False,
-                num_classes=len(RBCShape)
-            )
-            
-            # Load weights if file exists
+            from torchvision import transforms
             from pathlib import Path
-            if Path(model_path).exists():
-                state_dict = torch.load(model_path, map_location='cpu')
-                self.cnn_model.load_state_dict(state_dict)
-                self.cnn_model.eval()
-                print(f"   ✅ Shape classifier loaded: {model_path}")
-            else:
-                print(f"   ⚠️ Shape classifier not found: {model_path}")
-                self.cnn_model = None
-                
-        except ImportError:
-            print("   ⚠️ PyTorch/timm not available for CNN classifier")
+            
+            model_file = Path(model_path)
+            if not model_file.exists():
+                # Try symlink path
+                alt_path = model_file.parent / "rbc_3class_latest.pkl"
+                if alt_path.exists():
+                    model_file = alt_path
+                else:
+                    print(f"   ⚠️ CNN model not found: {model_path}")
+                    return
+            
+            # Load fastai exported model
+            from fastai.learner import load_learner
+            learner = load_learner(model_file)
+            
+            # Extract raw PyTorch model (bypass fastai's buggy predict())
+            self.cnn_model = learner.model
+            self.cnn_model.eval()
+            
+            # Set device
+            self.cnn_device = next(self.cnn_model.parameters()).device
+            
+            # ImageNet normalization (ResNet34 pretrained)
+            self.cnn_transform = transforms.Compose([
+                transforms.ToPILImage(),
+                transforms.Resize((224, 224)),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.485, 0.456, 0.406],
+                    std=[0.229, 0.224, 0.225]
+                )
+            ])
+            
+            print(f"   ✅ RBC CNN classifier loaded: {model_file}")
+            print(f"      Classes: {self.CNN_CLASSES}")
+            print(f"      Device: {self.cnn_device}")
+            
+        except ImportError as e:
+            print(f"   ⚠️ Failed to load CNN: {e}")
             self.cnn_model = None
+        except Exception as e:
+            print(f"   ⚠️ CNN model load error: {e}")
+            self.cnn_model = None
+    
+    def _cnn_classify(self, crop: np.ndarray) -> Tuple[str, float]:
+        """
+        Classify cell crop using CNN (malaria/sickle detection).
+        
+        Uses raw PyTorch inference to bypass fastai bugs.
+        
+        Args:
+            crop: BGR image crop of the cell
+            
+        Returns:
+            Tuple of (class_name, confidence)
+        """
+        import torch
+        
+        if self.cnn_model is None or crop is None:
+            return None, 0.0
+        
+        try:
+            # Convert BGR to RGB
+            if len(crop.shape) == 3 and crop.shape[2] == 3:
+                rgb_crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+            else:
+                rgb_crop = crop
+            
+            # Apply transforms
+            tensor = self.cnn_transform(rgb_crop).unsqueeze(0).to(self.cnn_device)
+            
+            # Inference
+            with torch.no_grad():
+                logits = self.cnn_model(tensor)
+                probs = torch.softmax(logits, dim=1)
+                pred_idx = probs.argmax(dim=1).item()
+                confidence = probs[0, pred_idx].item()
+            
+            class_name = self.CNN_CLASSES[pred_idx]
+            return class_name, confidence
+            
+        except Exception as e:
+            print(f"   ⚠️ CNN inference error: {e}")
+            return None, 0.0
     
     def classify(
         self,
@@ -379,7 +464,12 @@ class RBCShapeClassifier:
         crop: Optional[np.ndarray] = None
     ) -> Tuple[RBCShape, float]:
         """
-        Classify RBC shape based on metrics.
+        Classify RBC shape based on metrics and optional CNN.
+        
+        Classification priority:
+        1. CNN for malaria/sickle detection (if available and confident)
+        2. Rule-based for thalassemia indicators (target, teardrop, microcyte)
+        3. Rule-based for other abnormalities
         
         Args:
             metrics: Calculated shape metrics
@@ -388,40 +478,54 @@ class RBCShapeClassifier:
         Returns:
             Tuple of (RBCShape, confidence)
         """
-        # Priority order for classification
+        # 1. Try CNN classification for malaria/sickle (most critical)
+        if self.cnn_model is not None and crop is not None:
+            cnn_class, cnn_conf = self._cnn_classify(crop)
+            
+            if cnn_class is not None and cnn_conf >= 0.7:  # High confidence threshold
+                if cnn_class == 'infected':
+                    # Malaria detected - return as RING (early stage most common)
+                    # Could enhance to detect specific stage with more training data
+                    return RBCShape.RING, cnn_conf
+                elif cnn_class == 'sickle':
+                    return RBCShape.SICKLE, cnn_conf
+                # 'normal' from CNN - continue with rule-based for thalassemia check
         
-        # 1. Target cell (bullseye pattern)
+        # 2. Rule-based sickle cell detection (fallback if no CNN)
+        if metrics.circularity < 0.5 and metrics.elongation > 2.0:
+            return RBCShape.SICKLE, 0.80
+        
+        # 3. Target cell (bullseye pattern - thalassemia indicator)
         if metrics.has_bullseye:
             return RBCShape.TARGET, 0.85
         
-        # 2. High central pallor ratio with good circularity = target
+        # 4. High central pallor ratio with good circularity = target
         if metrics.central_pallor_ratio > 0.5 and metrics.circularity > 0.80:
             return RBCShape.TARGET, 0.75
         
-        # 3. Teardrop (high elongation with asymmetry)
+        # 5. Teardrop (high elongation - thalassemia indicator)
         if metrics.elongation > self.elongation_abnormal:
-            # Check for teardrop shape (would need more sophisticated analysis)
             return RBCShape.TEARDROP, 0.70
         
-        # 4. Spherocyte (very high circularity, small, dense)
+        # 6. Spherocyte (very high circularity, small, dense)
         if metrics.circularity > 0.95 and metrics.solidity > 0.98:
             if metrics.diameter_um < self.rbc_min_diameter:
                 return RBCShape.SPHEROCYTE, 0.75
         
-        # 5. Microcyte (small but otherwise normal)
+        # 7. Microcyte (small but otherwise normal - thalassemia indicator)
         if metrics.diameter_um < self.rbc_min_diameter:
             if metrics.circularity >= self.circularity_normal_min:
                 return RBCShape.MICROCYTE, 0.85
             else:
                 return RBCShape.IRREGULAR, 0.60
         
-        # 6. Irregular (low circularity or solidity)
+        # 8. Irregular (low circularity or solidity)
         if metrics.circularity < self.circularity_abnormal:
             return RBCShape.IRREGULAR, 0.65
         if metrics.solidity < 0.85:
             return RBCShape.IRREGULAR, 0.60
         
-        # 7. Normal
+        # 9. Normal
         if (metrics.circularity >= self.circularity_normal_min and
             metrics.elongation <= self.elongation_normal_max and
             metrics.solidity >= self.solidity_normal_min and
@@ -463,11 +567,17 @@ class RBCShapeClassifier:
         # Check if thalassemia indicator
         is_thal_indicator = shape in [RBCShape.TARGET, RBCShape.TEARDROP]
         
+        # Check if malaria infected
+        is_infected = shape in [RBCShape.RING, RBCShape.TROPHOZOITE]
+        parasite_stage = shape.value if is_infected else None
+        
         return ShapeClassification(
             shape=shape,
             confidence=confidence,
             metrics=metrics,
             is_thalassemia_indicator=is_thal_indicator,
+            is_infected=is_infected,
+            parasite_stage=parasite_stage,
             bbox=bbox,
             mask=mask,
             crop=image_crop
@@ -491,7 +601,7 @@ class RBCShapeClassifier:
         if not classifications:
             return ShapePopulationStats()
         
-        # Default weights
+        # Default weights for abnormality index
         if shape_weights is None:
             shape_weights = {
                 "target": 3.0,
@@ -499,6 +609,9 @@ class RBCShapeClassifier:
                 "microcyte": 1.5,
                 "spherocyte": 1.0,
                 "irregular": 1.0,
+                "sickle": 2.0,  # Sickle cells are significant
+                "ring": 0.0,  # Malaria tracked separately
+                "trophozoite": 0.0,
                 "normal": 0.0
             }
         
@@ -514,6 +627,13 @@ class RBCShapeClassifier:
             if clf.is_thalassemia_indicator:
                 stats.thalassemia_indicators += 1
                 stats.flagged_cells.append(clf)
+            if clf.is_infected:
+                stats.malaria_infected += 1
+                stage = clf.parasite_stage
+                if stage:
+                    stats.parasite_stages[stage] = stats.parasite_stages.get(stage, 0) + 1
+            if clf.shape == RBCShape.SICKLE:
+                stats.sickle_cells += 1
         
         # Calculate percentages
         for shape, count in stats.shape_counts.items():
@@ -521,6 +641,14 @@ class RBCShapeClassifier:
         
         # Thalassemia indicator percentage
         stats.thalassemia_indicator_pct = (stats.thalassemia_indicators / stats.total_cells) * 100
+        
+        # Malaria and sickle cell percentages
+        stats.malaria_infected_pct = (stats.malaria_infected / stats.total_cells) * 100
+        stats.sickle_cell_pct = (stats.sickle_cells / stats.total_cells) * 100
+        
+        # Malaria and sickle cell percentages
+        stats.malaria_infected_pct = (stats.malaria_infected / stats.total_cells) * 100
+        stats.sickle_cell_pct = (stats.sickle_cells / stats.total_cells) * 100
         
         # Calculate abnormality index (weighted sum)
         abnormal_score = 0.0

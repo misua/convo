@@ -116,3 +116,13 @@ dashboard:
   host: "127.0.0.1"
   port: 7860
   share: false
+# Grad-CAM Explainability (Model Attention Visualization)
+gradcam:
+  enabled: false  # Disabled by default for performance
+  colormap: "jet"  # Options: jet, turbo, viridis, inferno
+  alpha: 0.4  # Overlay transparency [0.0-1.0]
+  quality_threshold: 0.3  # Warn if attention outside bbox > threshold
+  save_individual: false  # Save per-cell heatmaps to disk
+  target_layers:
+    detection: "model.model.22"  # YOLO11 last C2f block
+    classification: "0.7"  # FastAI ResNet: model[0][7] (layer4)

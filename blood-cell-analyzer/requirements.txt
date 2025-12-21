@@ -30,6 +30,9 @@ tqdm>=4.65.0
 pyyaml>=6.0
 python-dotenv>=1.0.0
 
+# Explainability
+pytorch-grad-cam>=1.4.8
+
 # Jupyter
 jupyter>=1.0.0
 ipywidgets>=8.0.0

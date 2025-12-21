@@ -3,6 +3,7 @@
 Blood Smear Analysis Pipeline
 Combines YOLOv11/v8 detection + ResNet34 classification + Shape Analysis for full-field analysis.
 Enhanced with RBC shape classification for thalassemia screening.
+Supports Grad-CAM heatmap visualization for model explainability.
 """
 
 import sys
@@ -27,6 +28,19 @@ from src.models.shape_classifier import (
     ShapeClassification, ShapePopulationStats, RBCShape
 )
 
+# Import malaria detector
+from src.models.malaria_detector import MalariaDetector
+
+# Import Grad-CAM (optional)
+try:
+    from src.inference.gradcam import GradCAMGenerator, ClassificationGradCAM, GRADCAM_AVAILABLE
+    from src.inference.visualization import (
+        create_heatmap_overlay, create_comparison_grid, 
+        create_cell_heatmap_gallery, generate_gradcam_legend
+    )
+except ImportError:
+    GRADCAM_AVAILABLE = False
+
 
 def load_config() -> dict:
     """Load configuration from config.yaml."""
@@ -47,6 +61,7 @@ class BloodSmearAnalyzer:
         detection_conf: float = 0.5,
         min_crop_size: int = 50,
         enable_shape_analysis: bool = True,
+        enable_malaria_detection: bool = True,
         config: dict = None
     ):
         """
@@ -121,21 +136,67 @@ class BloodSmearAnalyzer:
         print(f"   ✅ Classification model loaded")
         print(f"   Classes: {list(self.wbc_classes)}")
         
-        # Initialize shape classifier
+        # Initialize YOLO malaria detector (object detection approach)
+        self.malaria_detector = None
+        if enable_malaria_detection:
+            print(f"\n🦠 Initializing YOLO malaria detector...")
+            try:
+                malaria_model_path = PROJECT_ROOT / "models/detection/malaria_yolo11n/weights/best.pt"
+                if malaria_model_path.exists():
+                    self.malaria_detector = MalariaDetector(str(malaria_model_path))
+                    print(f"   ✅ YOLO malaria detector ready (conf=0.55)")
+                else:
+                    print(f"   ⚠️ Malaria detector model not found: {malaria_model_path}")
+            except Exception as e:
+                print(f"   ⚠️ Failed to load malaria detector: {e}")
+        
+        # Initialize shape classifier (for thalassemia/sickle cell screening)
         if enable_shape_analysis:
             print(f"\n📦 Initializing shape classifier...")
+            
+            # Check for RBC CNN model (for sickle cell detection only)
+            rbc_model_path = PROJECT_ROOT / "models/classification/rbc_3class_latest.pkl"
+            use_cnn = rbc_model_path.exists()
+            
             self.shape_classifier = RBCShapeClassifier(
                 um_per_pixel=self.um_per_pixel,
-                use_deep_learning=False,  # Use rule-based for now
+                use_deep_learning=use_cnn,
+                model_path=str(rbc_model_path) if use_cnn else None,
                 config=self.config
             )
             print(f"   ✅ Shape classifier ready")
             print(f"   Calibration: {self.um_per_pixel} μm/pixel")
+            if use_cnn:
+                print(f"   CNN sickle cell detection: ENABLED")
+            else:
+                print(f"   CNN sickle cell detection: disabled (model not found)")
         else:
             self.shape_classifier = None
         
         # Detection class names (from BCCD)
         self.detection_classes = {0: "RBC", 1: "WBC", 2: "Platelets"}
+        
+        # Initialize Grad-CAM (if enabled and available)
+        self.gradcam_config = self.config.get('gradcam', {})
+        self.gradcam_enabled = self.gradcam_config.get('enabled', False) and GRADCAM_AVAILABLE
+        self.gradcam_generator = None
+        
+        if self.gradcam_enabled:
+            print(f"\n🔥 Initializing Grad-CAM...")
+            try:
+                # Get the underlying model from FastAI learner
+                model = self.classifier.model
+                model_name = self.config.get('classification', {}).get('model', 'efficientnet_b0')
+                self.gradcam_generator = ClassificationGradCAM.from_config(
+                    model=model,
+                    model_name=model_name,
+                    config=self.gradcam_config,
+                    device="cuda" if next(model.parameters()).is_cuda else "cpu"
+                )
+                print(f"   ✅ Grad-CAM ready (target layer: {self.gradcam_config.get('target_layers', {}).get('classification', 'features.8')})")
+            except Exception as e:
+                print(f"   ⚠️ Grad-CAM initialization failed: {e}")
+                self.gradcam_enabled = False
         
     def detect_cells(self, image_path: str, use_sliding_window: bool = True) -> dict:
         """
@@ -327,15 +388,16 @@ class BloodSmearAnalyzer:
         crop = image[y1:y2, x1:x2]
         return crop
     
-    def classify_wbc(self, crop: np.ndarray) -> tuple:
+    def classify_wbc(self, crop: np.ndarray, generate_heatmap: bool = False) -> tuple:
         """
         Classify a WBC crop.
         
         Args:
             crop: WBC crop as numpy array (BGR)
+            generate_heatmap: Whether to generate Grad-CAM heatmap
             
         Returns:
-            Tuple of (class_name, confidence, all_probs)
+            Tuple of (class_name, confidence, all_probs, heatmap_overlay or None)
         """
         # Convert BGR to RGB for fastai
         crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
@@ -349,7 +411,30 @@ class BloodSmearAnalyzer:
         # Get probabilities as dict
         prob_dict = {cls: float(probs[i]) for i, cls in enumerate(self.wbc_classes)}
         
-        return str(pred_class), float(probs[pred_idx]), prob_dict
+        # Generate Grad-CAM heatmap if requested
+        heatmap_overlay = None
+        if generate_heatmap and self.gradcam_enabled and self.gradcam_generator:
+            try:
+                # Resize for model input (224x224 for EfficientNet)
+                img_size = self.config.get('classification', {}).get('image_size', 224)
+                crop_resized = cv2.resize(crop_rgb, (img_size, img_size))
+                
+                # Generate overlay
+                colormap = self.gradcam_config.get('colormap', 'jet')
+                alpha = self.gradcam_config.get('alpha', 0.4)
+                heatmap_overlay = self.gradcam_generator.generate_overlay(
+                    crop_resized, 
+                    class_idx=int(pred_idx),
+                    colormap=colormap,
+                    alpha=alpha
+                )
+                
+                # Resize back to original crop size
+                heatmap_overlay = cv2.resize(heatmap_overlay, (crop.shape[1], crop.shape[0]))
+            except Exception as e:
+                print(f"   ⚠️ Grad-CAM failed: {e}")
+        
+        return str(pred_class), float(probs[pred_idx]), prob_dict, heatmap_overlay
     
     def analyze(self, image_path: str, save_visualization: bool = True) -> dict:
         """
@@ -395,7 +480,10 @@ class BloodSmearAnalyzer:
         
         # Step 2: Classify WBCs
         print("\n🔍 Step 2: Classifying WBC subtypes...")
+        if self.gradcam_enabled:
+            print("   (Grad-CAM heatmaps enabled)")
         wbc_classifications = []
+        wbc_heatmaps = []  # Store heatmaps for visualization
         
         for i, wbc in enumerate(detections["WBC"]):
             bbox = wbc["bbox"]
@@ -406,7 +494,9 @@ class BloodSmearAnalyzer:
                 print(f"   WBC {i+1}: Skipped (too small)")
                 continue
             
-            subtype, conf, probs = self.classify_wbc(crop)
+            subtype, conf, probs, heatmap = self.classify_wbc(
+                crop, generate_heatmap=self.gradcam_enabled
+            )
             
             wbc_classifications.append({
                 "id": i + 1,
@@ -416,6 +506,18 @@ class BloodSmearAnalyzer:
                 "classification_conf": conf,
                 "probabilities": probs
             })
+            
+            # Store heatmap for visualization
+            if heatmap is not None:
+                crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+                wbc_heatmaps.append({
+                    "id": i + 1,
+                    "subtype": subtype,
+                    "confidence": conf,
+                    "bbox": bbox,
+                    "original": crop_rgb,
+                    "overlay": heatmap
+                })
             
             print(f"   WBC {i+1}: {subtype} ({conf*100:.1f}%)")
         
@@ -501,6 +603,10 @@ class BloodSmearAnalyzer:
         # Add shape analysis results
         if shape_stats:
             used_masks = segmentations and len(segmentations.get("RBC", [])) > 0
+            
+            # Calculate multi-disorder risks
+            multi_disorder_risks = self._calculate_multi_disorder_risks(shape_stats)
+            
             results["shape_analysis"] = {
                 "enabled": True,
                 "method": "instance_segmentation" if used_masks else "bbox_approximation",
@@ -509,6 +615,11 @@ class BloodSmearAnalyzer:
                 "shape_counts": shape_stats.shape_counts,
                 "thalassemia_indicators": shape_stats.thalassemia_indicators,
                 "thalassemia_indicator_pct": shape_stats.thalassemia_indicator_pct,
+                "malaria_infected": shape_stats.malaria_infected,
+                "malaria_infected_pct": shape_stats.malaria_infected_pct,
+                "sickle_cells": shape_stats.sickle_cells,
+                "sickle_cell_pct": shape_stats.sickle_cell_pct,
+                "parasite_stages": shape_stats.parasite_stages,
                 "abnormality_index": shape_stats.abnormality_index,
                 "mean_circularity": shape_stats.mean_circularity,
                 "mean_elongation": shape_stats.mean_elongation,
@@ -519,6 +630,8 @@ class BloodSmearAnalyzer:
                         "confidence": fc.confidence,
                         "bbox": fc.bbox,
                         "is_thalassemia_indicator": fc.is_thalassemia_indicator,
+                        "is_infected": fc.is_infected,
+                        "parasite_stage": fc.parasite_stage,
                         "metrics": {
                             "circularity": fc.metrics.circularity,
                             "elongation": fc.metrics.elongation,
@@ -528,8 +641,62 @@ class BloodSmearAnalyzer:
                     for fc in shape_stats.flagged_cells[:10]  # Top 10
                 ]
             }
+            
+            # Add multi-disorder risks to results
+            if multi_disorder_risks:
+                results["multi_disorder_risks"] = multi_disorder_risks
         else:
             results["shape_analysis"] = {"enabled": False}
+        
+        # Run YOLO malaria detection (separate from shape analysis)
+        if self.malaria_detector is not None:
+            malaria_results = self.malaria_detector.detect(image)
+            diagnosis = self.malaria_detector.get_diagnosis(malaria_results)
+            
+            results["malaria_detection"] = {
+                "enabled": True,
+                "method": "yolo_object_detection",
+                "diagnosis": diagnosis['diagnosis'],
+                "severity": diagnosis['severity'],
+                "parasite_count": malaria_results['parasite_count'],
+                "infection_rate": malaria_results['infection_rate'],
+                "rbc_count": malaria_results['rbc_count'],
+                "total_cells": malaria_results['total_cells'],
+                "parasite_breakdown": malaria_results['parasite_breakdown'],
+                "dominant_stage": diagnosis['dominant_stage'],
+                "recommendation": diagnosis['recommendation'],
+                "detections": malaria_results['detections'][:20]  # Top 20 for reporting
+            }
+            
+            # Update multi_disorder_risks with YOLO malaria results (overrides CNN if present)
+            if malaria_results['parasite_count'] > 0:
+                if "multi_disorder_risks" not in results:
+                    results["multi_disorder_risks"] = {}
+                
+                results["multi_disorder_risks"]['malaria'] = {
+                    'level': 'urgent',
+                    'score': min(1.0, malaria_results['infection_rate'] / 10),
+                    'infected_cells': malaria_results['parasite_count'],
+                    'percentage': malaria_results['infection_rate'],
+                    'parasite_stages': malaria_results['parasite_breakdown'],
+                    'dominant_stage': diagnosis['dominant_stage'],
+                    'method': 'yolo',
+                    'interpretation': f"{malaria_results['parasite_count']} parasites detected ({malaria_results['infection_rate']:.2f}% parasitemia). {diagnosis['recommendation']}"
+                }
+        else:
+            results["malaria_detection"] = {"enabled": False}
+        
+        # Add Grad-CAM results
+        results["gradcam"] = {
+            "enabled": self.gradcam_enabled,
+            "cells_with_heatmaps": len(wbc_heatmaps),
+            "colormap": self.gradcam_config.get('colormap', 'jet') if self.gradcam_enabled else None,
+            "alpha": self.gradcam_config.get('alpha', 0.4) if self.gradcam_enabled else None,
+        }
+        
+        # Store heatmap data in results (for dashboard/PDF use)
+        if wbc_heatmaps:
+            results["_wbc_heatmaps"] = wbc_heatmaps  # Internal use, not serialized to JSON
         
         # Calculate differential (5 WBC classes)
         if wbc_classifications:
@@ -789,6 +956,36 @@ class BloodSmearAnalyzer:
         }
         return interpretations.get(risk_level, "Unable to determine risk level.")
     
+    def _calculate_multi_disorder_risks(self, shape_stats) -> dict:
+        """Calculate separate risk assessments for sickle cell and thalassemia (malaria handled separately by YOLO)."""
+        risks = {}
+        
+        # NOTE: Malaria risk is now calculated by YOLO detector in analyze() method
+        # This method focuses on sickle cell and thalassemia from shape analysis
+        
+        # Sickle cell risk (REFERRAL if >5%)
+        if shape_stats.sickle_cell_pct > 5.0:
+            risk_score = min(1.0, shape_stats.sickle_cell_pct / 40)
+            risks['sickle_cell'] = {
+                'level': 'referral',
+                'score': risk_score,
+                'sickle_cells': shape_stats.sickle_cells,
+                'percentage': shape_stats.sickle_cell_pct,
+                'interpretation': f'{shape_stats.sickle_cell_pct:.1f}% sickle cells detected. Consider sickle cell disease workup.'
+            }
+        
+        # Thalassemia risk (existing logic - MONITOR)
+        if shape_stats.thalassemia_indicator_pct > 30:
+            risks['thalassemia'] = {
+                'level': 'monitor',
+                'score': shape_stats.abnormality_index,
+                'indicators': shape_stats.thalassemia_indicators,
+                'percentage': shape_stats.thalassemia_indicator_pct,
+                'interpretation': f'{shape_stats.thalassemia_indicator_pct:.1f}% thalassemia indicators (target cells, teardrops). Significant morphological changes consistent with thalassemia.'
+            }
+        
+        return risks
+    
     def create_visualization(
         self,
         image: np.ndarray,
@@ -907,6 +1104,9 @@ def main():
     parser.add_argument("--conf", type=float, default=0.5, help="Detection confidence threshold")
     parser.add_argument("--output", help="Path to save JSON results")
     parser.add_argument("--no-shape", action="store_true", help="Disable shape analysis")
+    parser.add_argument("--gradcam", action="store_true", help="Enable Grad-CAM heatmap generation")
+    parser.add_argument("--no-gradcam", action="store_true", help="Disable Grad-CAM (overrides config)")
+    parser.add_argument("--save-heatmaps", type=str, metavar="DIR", help="Directory to save heatmap images")
     args = parser.parse_args()
     
     # Use sample image if none provided
@@ -918,14 +1118,40 @@ def main():
             print("❌ No image provided and sample image not found")
             return
     
+    # Handle Grad-CAM config override
+    config = load_config()
+    if args.gradcam:
+        if 'gradcam' not in config:
+            config['gradcam'] = {}
+        config['gradcam']['enabled'] = True
+    elif args.no_gradcam:
+        if 'gradcam' not in config:
+            config['gradcam'] = {}
+        config['gradcam']['enabled'] = False
+    
     # Initialize analyzer
     analyzer = BloodSmearAnalyzer(
         detection_conf=args.conf,
-        enable_shape_analysis=not args.no_shape
+        enable_shape_analysis=not args.no_shape,
+        config=config
     )
     
     # Run analysis
     results = analyzer.analyze(args.image)
+    
+    # Save heatmaps if requested
+    if args.save_heatmaps and results.get("_wbc_heatmaps"):
+        heatmap_dir = Path(args.save_heatmaps)
+        heatmap_dir.mkdir(parents=True, exist_ok=True)
+        
+        for hm in results["_wbc_heatmaps"]:
+            filename = f"wbc_{hm['id']}_{hm['subtype']}_gradcam.png"
+            filepath = heatmap_dir / filename
+            # Save overlay (RGB to BGR for OpenCV)
+            overlay_bgr = cv2.cvtColor(hm['overlay'], cv2.COLOR_RGB2BGR)
+            cv2.imwrite(str(filepath), overlay_bgr)
+        
+        print(f"\n🔥 Grad-CAM heatmaps saved to: {heatmap_dir}")
     
     # Print summary
     print("\n" + "=" * 60)
@@ -958,14 +1184,22 @@ def main():
         print(f"   • Score: {risk['score']*100:.0f}%")
         print(f"   • {risk['interpretation']}")
     
-    # Save results
+    # Print Grad-CAM status
+    if results.get("gradcam", {}).get("enabled"):
+        print(f"\n🔥 Grad-CAM:")
+        print(f"   • Cells with heatmaps: {results['gradcam']['cells_with_heatmaps']}")
+    
+    # Save results (exclude internal heatmap data which contains numpy arrays)
     if args.output:
         output_path = Path(args.output)
     else:
         output_path = Path(args.image).parent / f"{Path(args.image).stem}_results.json"
     
+    # Create serializable copy without numpy arrays
+    results_json = {k: v for k, v in results.items() if not k.startswith('_')}
+    
     with open(output_path, "w") as f:
-        json.dump(results, f, indent=2)
+        json.dump(results_json, f, indent=2)
     print(f"\n💾 Results saved to: {output_path}")
     
     print("\n✅ Analysis complete!")

@@ -24,6 +24,15 @@ from scripts.analyze_blood_smear import BloodSmearAnalyzer
 from src.inference.explainer import DiagnosisExplainer, RiskLevel
 from src.reports.pdf_generator import generate_pdf_report
 
+# Import Grad-CAM visualization utilities (optional)
+try:
+    from src.inference.visualization import (
+        create_cell_heatmap_gallery, generate_gradcam_legend
+    )
+    GRADCAM_VIS_AVAILABLE = True
+except ImportError:
+    GRADCAM_VIS_AVAILABLE = False
+
 
 def load_config():
     """Load configuration from config.yaml."""
@@ -40,32 +49,45 @@ explainer = None
 config = load_config()
 last_results = None  # Store last analysis results for PDF generation
 last_vis_path = None  # Store path to visualization
+gradcam_enabled = False  # Track Grad-CAM state
 
 
-def init_analyzer():
+def init_analyzer(enable_gradcam: bool = False):
     """Initialize the analyzer if not already done."""
-    global analyzer, explainer
-    if analyzer is None:
-        print("Loading models...")
-        analyzer = BloodSmearAnalyzer(
-            detection_conf=0.25,
-            enable_shape_analysis=True,
-            config=config
-        )
-        explainer = DiagnosisExplainer(config=config)
-        print("Models loaded!")
+    global analyzer, explainer, gradcam_enabled
+    
+    # Re-initialize if gradcam state changed
+    if analyzer is not None and gradcam_enabled == enable_gradcam:
+        return analyzer, explainer
+    
+    # Update gradcam config
+    analysis_config = config.copy()
+    if 'gradcam' not in analysis_config:
+        analysis_config['gradcam'] = {}
+    analysis_config['gradcam']['enabled'] = enable_gradcam
+    gradcam_enabled = enable_gradcam
+    
+    print(f"Loading models... (Grad-CAM: {enable_gradcam})")
+    analyzer = BloodSmearAnalyzer(
+        detection_conf=0.25,
+        enable_shape_analysis=True,
+        config=analysis_config
+    )
+    explainer = DiagnosisExplainer(config=analysis_config)
+    print("Models loaded!")
+    
     return analyzer, explainer
 
 
-def analyze_image(image, confidence_threshold):
+def analyze_image(image, confidence_threshold, show_gradcam=False):
     """Analyze uploaded blood smear image."""
     global last_results, last_vis_path
     
     if image is None:
-        return None, "Please upload an image", "", None
+        return None, "Please upload an image", "", None, None
     
-    # Initialize analyzer
-    analyzer, explainer = init_analyzer()
+    # Initialize analyzer with gradcam setting
+    analyzer, explainer = init_analyzer(enable_gradcam=show_gradcam)
     analyzer.detection_conf = confidence_threshold
     
     # Save temp image
@@ -97,12 +119,166 @@ def analyze_image(image, confidence_threshold):
         # Generate PDF
         pdf_path = generate_pdf(results, last_vis_path)
         
-        return vis_image, tech_report, plain_report, pdf_path
+        # Generate Grad-CAM gallery if enabled and available
+        gradcam_gallery = None
+        if show_gradcam and GRADCAM_VIS_AVAILABLE:
+            heatmaps = results.get('_wbc_heatmaps', [])
+            if heatmaps:
+                gradcam_gallery = create_cell_heatmap_gallery(heatmaps, cols=4)
+            elif results.get('cell_counts', {}).get('WBC', 0) == 0:
+                # Create placeholder message when no WBCs found
+                import PIL.Image
+                import PIL.ImageDraw
+                import PIL.ImageFont
+                placeholder = PIL.Image.new('RGB', (400, 100), color=(45, 45, 45))
+                draw = PIL.ImageDraw.Draw(placeholder)
+                draw.text((20, 35), "No WBCs detected - no heatmaps to generate", fill=(200, 200, 200))
+                gradcam_gallery = np.array(placeholder)
+        
+        # Generate pathology report
+        pathology_report = format_pathology_report(results)
+
+        return vis_image, tech_report, plain_report, pathology_report, pdf_path, gradcam_gallery
     
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return None, f"Error: {str(e)}", "", None
+        return None, f"Error: {str(e)}", "", "", None, None
+
+
+def format_pathology_report(results: dict) -> str:
+    """Format pathology findings as markdown."""
+    lines = []
+    
+    multi_disorder_risks = results.get('multi_disorder_risks', {})
+    
+    has_findings = False
+    
+    # Malaria (YOLO-based detection)
+    malaria_detection = results.get('malaria_detection', {})
+    if malaria_detection.get('enabled') and 'malaria' in multi_disorder_risks:
+        has_findings = True
+        data = multi_disorder_risks['malaria']
+        
+        # Get parasite breakdown
+        stages = data.get('parasite_stages', {})
+        stage_lines = []
+        for stage, count in stages.items():
+            if count > 0:
+                stage_emoji = {
+                    'ring': '🔴',
+                    'trophozoite': '🔺',
+                    'schizont': '🔵',
+                    'gametocyte': '🟬'
+                }.get(stage, '⬤')
+                stage_lines.append(f"  - {stage_emoji} {stage.title()}: {count}")
+        
+        lines.extend([
+            "## 🦠 Malaria Screening: POSITIVE (YOLO)",
+            "",
+            f"**⚠️ URGENT ALERT**",
+            f"- **Parasitemia:** {data['percentage']:.2f}%",
+            f"- **Total Parasites:** {data['infected_cells']}",
+            f"- **Dominant Stage:** {data.get('dominant_stage', 'unknown').title() if data.get('dominant_stage') else 'Mixed'}",
+            "",
+            "**Parasite Breakdown:**",
+            *stage_lines,
+            "",
+            "**Interpretation:**",
+            data['interpretation'],
+            "",
+            "**Method:** YOLOv11n Object Detection (conf=0.55)",
+            "",
+            "---",
+            ""
+        ])
+    elif malaria_detection.get('enabled'):
+        lines.extend([
+            "## 🦠 Malaria Screening: Negative (YOLO)",
+            "No malaria parasites detected in this sample.",
+            "",
+            "**Method:** YOLOv11n Object Detection (conf=0.55)",
+            "",
+            "---",
+            ""
+        ])
+    elif 'malaria' in multi_disorder_risks:
+        # Fallback for old CNN results (shouldn't happen with new code)
+        has_findings = True
+        data = multi_disorder_risks['malaria']
+        lines.extend([
+            "## 🦠 Malaria Screening: POSITIVE (Legacy CNN)",
+            "",
+            f"**⚠️ URGENT ALERT**",
+            f"- **Parasitemia:** {data['percentage']:.2f}%",
+            f"- **Infected Cells:** {data['infected_cells']}",
+            "",
+            "**Interpretation:**",
+            data['interpretation'],
+            "",
+            "---",
+            ""
+        ])
+    else:
+        lines.extend([
+            "## 🦠 Malaria Screening: Not Available",
+            "Malaria detection disabled or model not found.",
+            "",
+            "---",
+            ""
+        ])
+        
+    # Sickle Cell
+    if 'sickle_cell' in multi_disorder_risks:
+        has_findings = True
+        data = multi_disorder_risks['sickle_cell']
+        lines.extend([
+            "## 🌙 Sickle Cell Screening: POSITIVE",
+            "",
+            f"**⚠️ ABNORMAL FINDING**",
+            f"- **Sickle Cells:** {data['percentage']:.1f}%",
+            f"- **Count:** {data['sickle_cells']}",
+            "",
+            "**Interpretation:**",
+            data['interpretation'],
+            "",
+            "---",
+            ""
+        ])
+    else:
+        lines.extend([
+            "## 🌙 Sickle Cell Screening: Negative",
+            "No sickle cells detected in this sample.",
+            "",
+            "---",
+            ""
+        ])
+
+    # Thalassemia
+    if 'thalassemia' in multi_disorder_risks:
+        has_findings = True
+        data = multi_disorder_risks['thalassemia']
+        lines.extend([
+            "## 🩸 Thalassemia Screening: POSITIVE",
+            "",
+            f"**⚠️ ABNORMAL FINDING**",
+            f"- **Indicators:** {data['percentage']:.1f}% (Target cells, Teardrops)",
+            "",
+            "**Interpretation:**",
+            data['interpretation'],
+            ""
+        ])
+    else:
+        lines.extend([
+            "## 🩸 Thalassemia Screening: Negative",
+            "No significant thalassemia indicators detected.",
+            ""
+        ])
+        
+    if not has_findings:
+        lines.insert(0, "### ✅ No Significant Pathological Findings Detected\n")
+        
+    return "\n".join(lines)
 
 
 def generate_pdf(results, vis_path, patient_name="", patient_id="", patient_dob=""):
@@ -178,8 +354,48 @@ def format_report(results: dict) -> str:
         lines.extend([
             "---",
             "",
-            "## 🔴 RBC Shape Analysis (Thalassemia Screening)",
+            "## 🔴 RBC Shape Analysis (Multi-Disorder Screening)",
             "",
+        ])
+        
+        # Add urgent alerts for malaria and sickle cell
+        multi_disorder_risks = results.get('multi_disorder_risks', {})
+        if 'malaria' in multi_disorder_risks:
+            malaria_data = multi_disorder_risks['malaria']
+            
+            # Get parasite stages
+            stages = malaria_data.get('parasite_stages', {})
+            stage_text = ', '.join([f"{count} {stage}" for stage, count in stages.items() if count > 0])
+            
+            lines.extend([
+                "### 🚨 URGENT ALERT: MALARIA PARASITES DETECTED",
+                "",
+                f"**Parasitemia Level:** {malaria_data['percentage']:.2f}% ({malaria_data['infected_cells']} parasites)",
+                f"**Parasite Stages:** {stage_text or 'Mixed stages'}",
+                f"**Dominant Stage:** {malaria_data.get('dominant_stage', 'unknown').title() if malaria_data.get('dominant_stage') else 'Mixed'}",
+                "",
+                "**⚠️ IMMEDIATE ACTION REQUIRED:**",
+                "- Confirm with thick and thin blood smear microscopy",
+                "- Rapid Diagnostic Test (RDT) for malaria antigens",
+                "- Begin appropriate antimalarial therapy if confirmed",
+                "",
+            ])
+        
+        if 'sickle_cell' in multi_disorder_risks:
+            sickle_data = multi_disorder_risks['sickle_cell']
+            lines.extend([
+                "### ⚠️ SICKLE CELLS DETECTED",
+                "",
+                f"**Sickle Cell Percentage:** {sickle_data['percentage']:.1f}% ({sickle_data['sickle_cells']} cells)",
+                "",
+                "**Recommended Follow-up:**",
+                "- Hemoglobin electrophoresis for definitive diagnosis",
+                "- Sickle cell solubility test",
+                "- Genetic counseling if positive",
+                "",
+            ])
+        
+        lines.extend([
             "| Shape | Count | Percentage |",
             "|-------|-------|------------|",
         ])
@@ -190,7 +406,10 @@ def format_report(results: dict) -> str:
             "target": "🎯",
             "teardrop": "💧",
             "spherocyte": "⚫",
-            "irregular": "⬛"
+            "irregular": "⬛",
+            "ring": "🔴",  # Malaria ring stage
+            "trophozoite": "🔺",  # Malaria trophozoite
+            "sickle": "🌙"  # Sickle cell
         }
         
         shape_dist = shape_analysis['shape_distribution']
@@ -209,24 +428,55 @@ def format_report(results: dict) -> str:
             "",
             f"- **Cells Analyzed:** {shape_analysis.get('cells_analyzed', 0)}",
             f"- **Abnormality Index:** {shape_analysis.get('abnormality_index', 0):.2f}",
-            f"- **Thalassemia Indicators:** {shape_analysis.get('thalassemia_indicator_pct', 0):.1f}%",
+        ])
+        
+        # Add disorder-specific metrics
+        malaria_infected = shape_analysis.get('malaria_infected', 0)
+        sickle_cells = shape_analysis.get('sickle_cells', 0)
+        thal_indicators = shape_analysis.get('thalassemia_indicator_pct', 0)
+        
+        if malaria_infected > 0:
+            malaria_pct = shape_analysis.get('malaria_infected_pct', 0)
+            lines.append(f"- **Malaria Infected Cells:** {malaria_infected} ({malaria_pct:.2f}%)")
+        
+        if sickle_cells > 0:
+            sickle_pct = shape_analysis.get('sickle_cell_pct', 0)
+            lines.append(f"- **Sickle Cells:** {sickle_cells} ({sickle_pct:.1f}%)")
+        
+        lines.append(f"- **Thalassemia Indicators:** {thal_indicators:.1f}%")
+        
+        lines.extend([
             f"- **Mean Circularity:** {shape_analysis.get('mean_circularity', 0):.3f}",
             f"- **Mean Elongation:** {shape_analysis.get('mean_elongation', 0):.3f}",
         ])
         
-        # Add risk assessment (direct, not nested under 'thalassemia')
-        risk = results.get('risk_assessment', {})
-        if risk:
-            risk_level = risk.get('level', 'unknown')
-            risk_emoji = {"low": "🟢", "medium": "🟡", "high": "🔴"}.get(risk_level, "⚪")
+        # Add multi-disorder risk assessment
+        if multi_disorder_risks:
             lines.extend([
                 "",
-                "### Thalassemia Risk Assessment",
+                "### Multi-Disorder Risk Assessment",
                 "",
-                f"- **Risk Level:** {risk_emoji} {risk_level.upper()}",
-                f"- **Risk Score:** {risk.get('score', 0)*100:.1f}%",
-                f"- **Interpretation:** {risk.get('interpretation', 'N/A')}",
             ])
+            
+            for disorder, risk_data in multi_disorder_risks.items():
+                risk_level = risk_data.get('level', 'unknown')
+                risk_emoji = {"urgent": "🔴", "referral": "🟠", "monitor": "🟡", "low": "🟢"}.get(risk_level, "⚪")
+                disorder_name = disorder.replace('_', ' ').title()
+                lines.append(f"- **{disorder_name}:** {risk_emoji} {risk_level.upper()} - {risk_data.get('interpretation', 'N/A')}")
+        else:
+            # Legacy thalassemia risk
+            risk = results.get('risk_assessment', {})
+            if risk:
+                risk_level = risk.get('level', 'unknown')
+                risk_emoji = {"low": "🟢", "medium": "🟡", "high": "🔴"}.get(risk_level, "⚪")
+                lines.extend([
+                    "",
+                    "### Thalassemia Risk Assessment",
+                    "",
+                    f"- **Risk Level:** {risk_emoji} {risk_level.upper()}",
+                    f"- **Risk Score:** {risk.get('score', 0)*100:.1f}%",
+                    f"- **Interpretation:** {risk.get('interpretation', 'N/A')}",
+                ])
     
     if results.get('differential') and results['summary']['wbc_classified'] > 0:
         lines.extend([
@@ -335,6 +585,7 @@ def build_interface():
         | 🔍 Cell Detection | YOLOv11n | **92.8% mAP50** | BCCD Dataset (364 images, 4,888 cells) |
         | 🎭 Instance Segmentation | YOLOv11n-seg | **98.2% mAP50** | BCCD + Masks (1,209 images) |
         | 🧬 WBC Classification | ResNet34 | **97.9% accuracy** | Raabin-WBC (10,175 cells, 5 classes) |
+        | 🦠 Malaria/Sickle Cell | ResNet34 | **96.3% accuracy** | Custom Dataset (3 classes) |
         | 🔴 RBC Shape Analysis | Morphometry | Rule-based | Clinical thresholds |
         
         📄 **PDF reports available** with patient info and clinical recommendations.
@@ -349,6 +600,11 @@ def build_interface():
                         confidence_slider = gr.Slider(
                             minimum=0.1, maximum=0.9, value=0.25, step=0.05,
                             label="Detection Confidence Threshold"
+                        )
+                        gradcam_toggle = gr.Checkbox(
+                            label="🔥 Show Grad-CAM Heatmaps",
+                            value=False,
+                            info="Visualize which regions the AI focuses on for WBC classification"
                         )
                         analyze_btn = gr.Button("🔬 Analyze", variant="primary")
                     
@@ -370,7 +626,34 @@ def build_interface():
                         """)
                         plain_report_output = gr.Markdown(label="Plain Language Report")
                     
-                    with gr.TabItem("📄 PDF Report"):
+                    with gr.TabItem("🦠 Pathology Screening"):
+                        gr.Markdown("""
+                        ### Pathology Screening Results
+                        
+                        This section highlights specific pathological findings for **Malaria** and **Sickle Cell Disease**.
+                        
+                        *Note: This is a screening tool, not a diagnostic device. All findings must be confirmed by laboratory tests.*
+                        """)
+                        pathology_output = gr.Markdown(label="Pathology Findings")
+                    
+                    with gr.TabItem("� Grad-CAM Attention"):
+                        gr.Markdown("""
+                        ### Model Attention Visualization (Grad-CAM)
+                        
+                        When enabled, this shows **which image regions** the AI model focuses on 
+                        when classifying white blood cells. This helps verify the model is looking 
+                        at the correct cell features.
+                        
+                        **Color Scale:**
+                        - 🔵 **Blue** = Low attention (model ignores this region)
+                        - 🟡 **Yellow** = Medium attention
+                        - 🔴 **Red** = High attention (model focuses here)
+                        
+                        *Enable "Show Grad-CAM Heatmaps" checkbox above to generate visualizations.*
+                        """)
+                        gradcam_gallery = gr.Image(label="WBC Attention Heatmaps", visible=True)
+                    
+                    with gr.TabItem("�📄 PDF Report"):
                         gr.Markdown("""
                         ### Generate Printable PDF Report
                         Download a comprehensive PDF report with all analysis results.
@@ -399,8 +682,8 @@ def build_interface():
                 
                 analyze_btn.click(
                     analyze_image,
-                    inputs=[input_image, confidence_slider],
-                    outputs=[output_image, report_output, plain_report_output, pdf_output]
+                    inputs=[input_image, confidence_slider, gradcam_toggle],
+                    outputs=[output_image, report_output, plain_report_output, pathology_output, pdf_output, gradcam_gallery]
                 )
             
             # Tab 2: Single Cell Classification
@@ -471,7 +754,7 @@ def build_interface():
                 | **Eosinophil** | 1-4% | Allergies, parasites, asthma |
                 | **Basophil** | 0-2% | Allergic reactions, some blood disorders |
                 
-                #### 3. RBC Shape Analysis
+                #### 3. RBC Shape Analysis (Multi-Disorder Screening)
                 
                 Red blood cells should be round, disc-shaped, and similar in size. 
                 Abnormal shapes can indicate health conditions:
@@ -484,6 +767,9 @@ def build_interface():
                 | **Teardrop** | Elongated like a teardrop | Bone marrow problems, severe anemia |
                 | **Spherocyte** | Too round (like a ball) | Hereditary condition or immune issue |
                 | **Irregular** | Oddly shaped cells | Various causes, needs doctor review |
+                | **Ring** 🔴 | Thin ring inside cell | **URGENT:** Malaria parasite (early stage) |
+                | **Trophozoite** 🔺 | Amoeboid form inside cell | **URGENT:** Malaria parasite (mature stage) |
+                | **Sickle** 🌙 | Crescent/banana shaped | Sickle cell disease - requires confirmation |
                 
                 #### 4. Thalassemia Risk Assessment
                 
@@ -547,7 +833,13 @@ def build_interface():
                 | **Task** | Measure shape features to identify abnormalities |
                 | **Method** | Mathematical analysis of cell geometry |
                 | **Measurements** | Circularity, elongation, size, central pallor |
-                | **Purpose** | Screen for thalassemia and other blood disorders |
+                | **Shape Categories** | 9 classes: Normal, Microcyte, Target, Teardrop, Spherocyte, Irregular, Ring, Trophozoite, Sickle |
+                | **Purpose** | Screen for thalassemia, malaria, and sickle cell disease |
+                
+                **Multi-Disorder Detection:**
+                - **Malaria:** Ring and trophozoite stage parasites (urgent)
+                - **Sickle Cell Disease:** Crescent-shaped sickled cells (referral)
+                - **Thalassemia:** Microcytes, target cells, teardrops (monitoring)
                 
                 ---
                 
