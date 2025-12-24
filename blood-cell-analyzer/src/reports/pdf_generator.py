@@ -920,8 +920,8 @@ class BloodSmearPDFReport:
                 'teardrop': 'May indicate bone marrow disorder',
                 'spherocyte': 'Hereditary spherocytosis or immune hemolysis',
                 'irregular': 'Various causes, requires evaluation',
-                'ring': '⚠️ URGENT - Malaria parasite detected (ring stage)',
-                'trophozoite': '⚠️ URGENT - Mature malaria parasite detected',
+                'ring': '⚠️ Ring-like structure detected - requires microscopic confirmation',
+                'trophozoite': '⚠️ Irregular structure detected - expert review recommended',
                 'sickle': 'May indicate sickle cell disease - requires confirmation',
             }
             
@@ -1124,7 +1124,7 @@ class BloodSmearPDFReport:
             # Malaria findings
             if 'malaria' in multi_disorder_risks:
                 malaria_data = multi_disorder_risks['malaria']
-                notes.append(f"• <b>⚠️ URGENT - Malaria Parasites Detected:</b> {malaria_data['infected_cells']} infected RBCs ({malaria_data['percentage']:.1f}%). Immediate lab confirmation required.")
+                notes.append(f"• <b>⚠️ Candidate Structures Detected:</b> {malaria_data['candidate_structures']} parasite-like structures ({malaria_data['detection_rate']:.1f}% detection rate). Expert microscopic review required.")
             
             # Sickle cell findings
             if 'sickle_cell' in multi_disorder_risks:
@@ -1146,7 +1146,7 @@ class BloodSmearPDFReport:
         return elements
     
     def _build_malaria_findings(self, results: Dict) -> list:
-        """Build detailed malaria findings section if parasites detected."""
+        """Build detailed malaria object detection findings if structures detected."""
         elements = []
         
         multi_disorder_risks = results.get('multi_disorder_risks', {})
@@ -1154,12 +1154,19 @@ class BloodSmearPDFReport:
             return elements
         
         shape_analysis = results.get('shape_analysis', {})
-        parasite_stages = shape_analysis.get('parasite_stages', {})
+        structure_types = {}
         
-        # Section header with urgent styling
-        section_header = Table([['⚠️ URGENT: MALARIA PARASITE FINDINGS']], colWidths=[6.3*inch])
+        # Try to get from multi_disorder_risks first
+        if 'structure_types' in multi_disorder_risks.get('malaria', {}):
+            structure_types = multi_disorder_risks['malaria']['structure_types']
+        # Fallback to shape_analysis if available
+        elif 'parasite_stages' in shape_analysis:
+            structure_types = shape_analysis.get('parasite_stages', {})
+        
+        # Section header with attention-grabbing styling
+        section_header = Table([['🔬 MALARIA OBJECT DETECTION FINDINGS - EXPERT REVIEW REQUIRED']], colWidths=[6.3*inch])
         section_header.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, -1), COLORS['danger']),
+            ('BACKGROUND', (0, 0), (-1, -1), COLORS['warning']),
             ('TEXTCOLOR', (0, 0), (-1, -1), COLORS['white']),
             ('FONTNAME', (0, 0), (-1, -1), 'Helvetica-Bold'),
             ('FONTSIZE', (0, 0), (-1, -1), 11),
@@ -1173,37 +1180,37 @@ class BloodSmearPDFReport:
         malaria_data = multi_disorder_risks['malaria']
         
         elements.append(Paragraph(
-            f"<b>Parasitemia Level:</b> {malaria_data['percentage']:.2f}% ({malaria_data['infected_cells']} infected cells detected)",
+            f"<b>Detection Rate:</b> {malaria_data['detection_rate']:.2f}% of analyzed cells ({malaria_data['candidate_structures']} candidate structures)",
             self.styles['ReportBody']
         ))
         elements.append(Spacer(1, 8))
         
-        # Parasite stage breakdown
-        if parasite_stages:
-            elements.append(Paragraph("<b>Parasite Stage Distribution:</b>", self.styles['SubsectionHeader']))
+        # Structure type breakdown
+        if structure_types:
+            elements.append(Paragraph("<b>Detected Structure Type Distribution:</b>", self.styles['SubsectionHeader']))
             
-            stage_data = [['Stage', 'Count', 'Clinical Significance']]
+            structure_data = [['Structure Type', 'Count', 'Typical Characteristics']]
             
-            ring_count = parasite_stages.get('ring', 0)
-            tropho_count = parasite_stages.get('trophozoite', 0)
+            ring_count = structure_types.get('ring', 0)
+            tropho_count = structure_types.get('trophozoite', 0)
             
             if ring_count > 0:
-                stage_data.append([
-                    'Ring Stage',
+                structure_data.append([
+                    'Ring-like',
                     str(ring_count),
-                    'Early infection - thin ring appearance'
+                    'Small, thin ring appearance in RBC'
                 ])
             
             if tropho_count > 0:
-                stage_data.append([
-                    'Trophozoite',
+                structure_data.append([
+                    'Trophozoite-like',
                     str(tropho_count),
-                    'Mature parasite - amoeboid form'
+                    'Larger, irregular amoeboid form'
                 ])
             
-            stage_table = Table(stage_data, colWidths=[1.8*inch, 1.0*inch, 3.5*inch])
-            stage_table.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), COLORS['danger']),
+            structure_table = Table(structure_data, colWidths=[1.8*inch, 1.0*inch, 3.5*inch])
+            structure_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), COLORS['warning']),
                 ('TEXTCOLOR', (0, 0), (-1, 0), COLORS['white']),
                 ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
                 ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
@@ -1214,20 +1221,37 @@ class BloodSmearPDFReport:
                 ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
                 ('TOPPADDING', (0, 0), (-1, -1), 5),
             ]))
-            elements.append(stage_table)
+            elements.append(structure_table)
             elements.append(Spacer(1, 8))
         
-        # Urgent recommendations
-        elements.append(Paragraph("<b>⚠️ Immediate Actions Required:</b>", self.styles['SubsectionHeader']))
-        recommendations = [
-            "• <b>URGENT:</b> Confirm with thick and thin blood smear microscopy",
-            "• Rapid Diagnostic Test (RDT) for malaria antigens",
-            "• Complete blood count with differential",
-            "• Begin appropriate antimalarial therapy if confirmed",
-            "• Monitor for complications (cerebral malaria, severe anemia)"
+        # Important disclaimer box
+        disclaimer_header = Paragraph("<b>⚠️ IMPORTANT - READ CAREFULLY:</b>", self.styles['SubsectionHeader'])
+        elements.append(disclaimer_header)
+        
+        disclaimer_points = [
+            "• <b>Screening Tool Only:</b> This analysis uses YOLOv11n object detection for automated screening assistance.",
+            "• <b>Not Diagnostic:</b> Detected structures are candidates that require confirmation by trained microscopist.",
+            "• <b>Gold Standard Required:</b> All findings MUST be validated via thick and thin blood smear microscopy.",
+            "• <b>Clinical Correlation:</b> Results should be interpreted in context of patient symptoms and clinical history.",
+            "• <b>Expert Review:</b> A qualified medical laboratory technologist or pathologist must review this sample."
         ]
         
-        for rec in recommendations:
+        for point in disclaimer_points:
+            elements.append(Paragraph(point, self.styles['BulletPoint']))
+        
+        elements.append(Spacer(1, 8))
+        
+        # Recommended follow-up actions (observational, not prescriptive)
+        elements.append(Paragraph("<b>Recommended Follow-up Actions:</b>", self.styles['SubsectionHeader']))
+        followup = [
+            "• Manual microscopic examination of thick and thin blood smears",
+            "• Rapid Diagnostic Test (RDT) for malaria antigens if clinically indicated",
+            "• Complete blood count (CBC) with differential",
+            "• Clinical correlation with patient travel history and symptoms",
+            "• Consider repeat testing if clinical suspicion remains high"
+        ]
+        
+        for rec in followup:
             elements.append(Paragraph(rec, self.styles['BulletPoint']))
         
         elements.append(Spacer(1, 15))

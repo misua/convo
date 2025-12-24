@@ -650,21 +650,22 @@ class BloodSmearAnalyzer:
         # Run YOLO malaria detection (separate from shape analysis)
         if self.malaria_detector is not None:
             malaria_results = self.malaria_detector.detect(image)
-            diagnosis = self.malaria_detector.get_diagnosis(malaria_results)
+            findings = self.malaria_detector.get_findings(malaria_results)
             
             results["malaria_detection"] = {
                 "enabled": True,
                 "method": "yolo_object_detection",
-                "diagnosis": diagnosis['diagnosis'],
-                "severity": diagnosis['severity'],
-                "parasite_count": malaria_results['parasite_count'],
-                "infection_rate": malaria_results['infection_rate'],
+                "observation": findings['observation'],
+                "density": findings['density'],
+                "structure_count": malaria_results['parasite_count'],
+                "detection_rate": malaria_results['infection_rate'],
                 "rbc_count": malaria_results['rbc_count'],
                 "total_cells": malaria_results['total_cells'],
-                "parasite_breakdown": malaria_results['parasite_breakdown'],
-                "dominant_stage": diagnosis['dominant_stage'],
-                "recommendation": diagnosis['recommendation'],
-                "detections": malaria_results['detections'][:20]  # Top 20 for reporting
+                "structure_breakdown": malaria_results['parasite_breakdown'],
+                "dominant_type": findings['dominant_stage'],
+                "note": findings['note'],
+                "detections": malaria_results['detections'][:20],  # Top 20 for reporting
+                "disclaimer": "Object detection for screening assistance only. Not diagnostic."
             }
             
             # Update multi_disorder_risks with YOLO malaria results (overrides CNN if present)
@@ -673,14 +674,14 @@ class BloodSmearAnalyzer:
                     results["multi_disorder_risks"] = {}
                 
                 results["multi_disorder_risks"]['malaria'] = {
-                    'level': 'urgent',
+                    'level': 'review_needed',
                     'score': min(1.0, malaria_results['infection_rate'] / 10),
-                    'infected_cells': malaria_results['parasite_count'],
-                    'percentage': malaria_results['infection_rate'],
-                    'parasite_stages': malaria_results['parasite_breakdown'],
-                    'dominant_stage': diagnosis['dominant_stage'],
-                    'method': 'yolo',
-                    'interpretation': f"{malaria_results['parasite_count']} parasites detected ({malaria_results['infection_rate']:.2f}% parasitemia). {diagnosis['recommendation']}"
+                    'candidate_structures': malaria_results['parasite_count'],
+                    'detection_rate': malaria_results['infection_rate'],
+                    'structure_types': malaria_results['parasite_breakdown'],
+                    'dominant_type': findings['dominant_stage'],
+                    'method': 'yolo_object_detection',
+                    'interpretation': f"{malaria_results['parasite_count']} candidate structures detected ({malaria_results['infection_rate']:.2f}% detection rate). {findings['note']}"
                 }
         else:
             results["malaria_detection"] = {"enabled": False}
@@ -1037,10 +1038,16 @@ class BloodSmearAnalyzer:
                 thickness = 2  # Thicker for flagged cells
                 # Draw with highlight
                 cv2.circle(vis, (cx, cy), r, color, thickness)
-                # Add small label for thalassemia indicators
+                # Add large, visible label for thalassemia indicators
                 if shape in ["target", "teardrop"]:
                     label = "T" if shape == "target" else "D"
-                    cv2.putText(vis, label, (cx-5, cy+5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+                    # Draw label with black outline for visibility
+                    font_scale = 1.2
+                    font_thickness = 3
+                    # Black outline (thicker)
+                    cv2.putText(vis, label, (cx-10, cy+10), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), font_thickness+2)
+                    # White text (on top)
+                    cv2.putText(vis, label, (cx-10, cy+10), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), font_thickness)
             else:
                 cv2.circle(vis, (cx, cy), r, colors["RBC"], 1)
         

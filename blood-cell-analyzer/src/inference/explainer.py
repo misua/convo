@@ -213,7 +213,8 @@ class DiagnosisExplainer:
         
         # Get shape results if available
         if shape_stats:
-            shape_pcts = shape_stats.get('shape_percentages', {})
+            # Try shape_distribution first (from analyze_blood_smear), fallback to shape_percentages
+            shape_pcts = shape_stats.get('shape_distribution', shape_stats.get('shape_percentages', {}))
             target_pct = shape_pcts.get('target', 0)
             teardrop_pct = shape_pcts.get('teardrop', 0)
             abnormality_index = shape_stats.get('abnormality_index', 0)
@@ -488,7 +489,7 @@ class DiagnosisExplainer:
         return "\n".join(lines)
     
     def format_as_markdown(self, diagnosis: PlainDiagnosis) -> str:
-        """Format PlainDiagnosis as Markdown for display."""
+        """Format PlainDiagnosis as Markdown for display with clear comparison tables."""
         lines = [
             f"# 🩸 Your Blood Analysis Results",
             "",
@@ -502,26 +503,66 @@ class DiagnosisExplainer:
             "",
             "---",
             "",
-            "## What We Found",
-            ""
+            "## 📋 Quick Summary Table",
+            "",
+            "| Test | Your Result | Normal Range | Status | What It Means |",
+            "|------|-------------|--------------|--------|---------------|",
         ]
         
-        # Add findings
+        # Add findings as table rows for easy scanning
+        for finding in diagnosis.findings:
+            # Clean up explanation to remove emoji/status icon for table
+            clean_explanation = finding.explanation.replace("✅ ", "").replace("⚠️ ", "")
+            
+            # Determine status icon based on finding status
+            status_icon = "✅" if finding.status == "normal" else "⚠️"
+            status_text = "Normal" if finding.status == "normal" else "Abnormal"
+            
+            # Extract value from explanation if present, otherwise use finding.value
+            value_text = finding.value
+            
+            # Get threshold from template (simplified)
+            threshold_map = {
+                "Cell size": "6-8 µm diameter",
+                "Cell color": "Normal hemoglobin",
+                "Bull's-eye pattern": "<5%",
+                "Teardrop shape": "<2%",
+                "Size variation": "11.5-14.5%"
+            }
+            threshold = threshold_map.get(finding.plain_name, "Normal")
+            
+            # Simplified significance
+            significance = finding.significance.split(".")[0]  # First sentence only
+            
+            lines.append(f"| {finding.icon} {finding.plain_name} | {value_text} | {threshold} | {status_icon} {status_text} | {significance} |")
+        
+        lines.extend([
+            "",
+            "---",
+            "",
+            "## 📖 Detailed Explanations",
+            "",
+            "### What We Found:",
+            ""
+        ])
+        
+        # Add detailed findings
         for finding in diagnosis.findings:
             lines.append(f"**{finding.icon} {finding.plain_name}**")
             lines.append(f"> {finding.explanation}")
+            lines.append(f"> *Clinical Note:* {finding.significance}")
             lines.append("")
         
         lines.extend([
             "---",
             "",
-            "## What This Might Mean",
+            "## 💡 What This Might Mean",
             "",
             diagnosis.what_this_means,
             "",
             "---",
             "",
-            "## Recommended Next Steps",
+            "## 👨‍⚕️ Recommended Next Steps",
             ""
         ])
         

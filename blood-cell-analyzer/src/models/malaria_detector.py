@@ -208,49 +208,53 @@ class MalariaDetector:
         
         return img_vis
     
-    def get_diagnosis(self, results: Dict) -> Dict:
+    def get_findings(self, results: Dict) -> Dict:
         """
-        Generate clinical diagnosis from detection results.
+        Generate observational findings from detection results.
+        
+        NOTE: This is object detection for screening assistance only.
+        Results indicate structures detected by the model that may require
+        expert microscopic evaluation. NOT for clinical diagnosis.
         
         Args:
             results: Output from detect()
         
         Returns:
-            Dictionary with diagnosis information
+            Dictionary with observational findings
         """
         parasite_count = results['parasite_count']
         infection_rate = results['infection_rate']
         breakdown = results['parasite_breakdown']
         
-        # Determine diagnosis
+        # Observational summary (not diagnostic)
         if parasite_count == 0:
-            diagnosis = "Negative"
-            severity = "None"
-            recommendation = "No malarial parasites detected."
+            observation = "No parasite-like structures detected"
+            density = "None"
+            note = "Analysis did not identify structures matching trained parasite patterns."
         elif infection_rate < 0.1:
-            diagnosis = "Positive (Very Low Parasitemia)"
-            severity = "Mild"
-            recommendation = "Low parasite count detected. Clinical correlation recommended."
+            observation = "Very few candidate structures detected"
+            density = "Very Low"
+            note = "Low number of structures identified. Expert microscopic review recommended."
         elif infection_rate < 1.0:
-            diagnosis = "Positive (Low Parasitemia)"
-            severity = "Mild"
-            recommendation = "Confirmed malaria infection. Initiate treatment."
+            observation = "Some candidate structures detected"
+            density = "Low"
+            note = "Multiple structures detected. Requires confirmation via thick/thin smear microscopy."
         elif infection_rate < 5.0:
-            diagnosis = "Positive (Moderate Parasitemia)"
-            severity = "Moderate"
-            recommendation = "Moderate parasite load. Prompt treatment required."
+            observation = "Moderate number of candidate structures detected"
+            density = "Moderate"
+            note = "Notable quantity of structures identified. Expert evaluation needed for confirmation."
         else:
-            diagnosis = "Positive (High Parasitemia)"
-            severity = "Severe"
-            recommendation = "High parasite load. Immediate treatment and monitoring required."
+            observation = "High number of candidate structures detected"
+            density = "High"
+            note = "Extensive structures detected. Immediate expert microscopic evaluation recommended."
         
         # Dominant stage
         dominant_stage = max(breakdown, key=breakdown.get) if any(breakdown.values()) else None
         
         return {
-            'diagnosis': diagnosis,
-            'severity': severity,
-            'recommendation': recommendation,
+            'observation': observation,
+            'density': density,
+            'note': note,
             'parasite_count': parasite_count,
             'infection_rate': infection_rate,
             'parasite_stages': breakdown,
